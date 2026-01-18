@@ -16,6 +16,7 @@ import traceback
 import warnings
 import nltk
 import sys
+import io
 
 warnings.filterwarnings('ignore')
 
@@ -455,70 +456,85 @@ def test_mongo():
 
 @app.route('/process-content', methods=['POST'])
 def process_content():
-    """Process text content directly (no file needed)"""
+    """Process text content directly (Smart CSV Support Added)"""
     try:
         data = request.json
         content = data.get('content', '')
+        filename = data.get('filename', 'unknown.txt').lower() # Backend sends this!
         job_id = data.get('jobId')
         user_id = data.get('userId')
         
         if not content:
             return jsonify({'success': False, 'error': 'No content provided'}), 400
         
-        print(f"📊 Processing {len(content)} characters from direct content")
+        print(f"📊 Processing content from: {filename} ({len(content)} chars)")
         
-        # Split into lines
-        texts = [line.strip() for line in content.split('\n') if line.strip()]
+        texts = []
+        
+        # === SMART PARSING LOGIC ===
+        if filename.endswith('.csv'):
+            try:
+                # Use Pandas to parse the raw string as a CSV
+                csv_file = io.StringIO(content)
+                df = pd.read_csv(csv_file)
+                
+                # Smart Column Detection
+                found_text = False
+                for col in ['text', 'content', 'message', 'review', 'comment']:
+                    if col in df.columns:
+                        texts = df[col].astype(str).tolist()
+                        print(f"📖 Extracted {len(texts)} rows from CSV column: '{col}'")
+                        found_text = True
+                        break
+                
+                if not found_text and len(df.columns) > 0:
+                    # Fallback: Use first column
+                    texts = df.iloc[:, 0].astype(str).tolist()
+                    print("📖 Extracted text from first CSV column (Fallback)")
+                    
+            except Exception as e:
+                print(f"⚠️ CSV Parsing failed ({e}), falling back to simple split")
+                texts = [line.strip() for line in content.split('\n') if line.strip()]
+        else:
+            # Standard TXT handling
+            texts = [line.strip() for line in content.split('\n') if line.strip()]
+        # ===========================
         
         if not texts:
             return jsonify({'success': False, 'error': 'No text content found'}), 400
         
-        # Process with your ML model (same function)
+        # Use SMART DISPATCHER
         processing_result = smart_process_texts(texts, job_id, user_id)
         
-        # Update MongoDB if job_id provided
+        # LOGGING PROOF (So you can see it working)
+        print(f"✅ Finished. First result score: {processing_result['results'][0]['sentimentScore']}")
+
+        # Update MongoDB (Rest of the code stays the same...)
         if job_id and mongo_client:
             try:
                 db = mongo_client.text_processor
                 jobs_collection = db.processingjobs
-                
-                update_data = {
-                    'status': 'completed',
-                    'progress': 100,
-                    'totalLines': processing_result['totalLines'],
-                    'processingTimeMs': processing_result['processingTimeMs'],
-                    'workersUsed': processing_result['workersUsed'],
-                    'averageSentiment': processing_result['averageSentiment'],
-                    'sentimentDistribution': processing_result['sentimentDistribution'],
-                    'results': processing_result['results'],
-                    'completedAt': datetime.utcnow()
-                }
-                
-                result = jobs_collection.update_one(
+                jobs_collection.update_one(
                     {'_id': ObjectId(job_id)},
-                    {'$set': update_data}
+                    {'$set': {
+                        'status': 'completed',
+                        'progress': 100,
+                        'results': processing_result['results'],
+                        'sentimentDistribution': processing_result['sentimentDistribution'],
+                        'processingMode': processing_result['processingMode'],
+                        'completedAt': datetime.utcnow()
+                    }}
                 )
-                
                 print(f"✅ Updated MongoDB job {job_id}")
-                
             except Exception as e:
                 print(f"⚠️ MongoDB update failed: {e}")
-                processing_result['mongoUpdateError'] = str(e)
         
-        return jsonify({
-            'success': True,
-            'jobId': job_id,
-            'message': f'Processed {len(texts)} lines successfully',
-            'processingResult': processing_result
-        }), 200
+        return jsonify({'success': True, 'jobId': job_id, 'processingResult': processing_result}), 200
         
     except Exception as e:
         error_msg = f"Content processing failed: {str(e)}"
         print(f"❌ {error_msg}")
-        return jsonify({
-            'success': False,
-            'error': error_msg
-        }), 500
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 @app.route('/process-file', methods=['POST'])
 def process_file():
