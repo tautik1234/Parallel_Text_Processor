@@ -14,7 +14,8 @@ import time
 import os
 import traceback
 import warnings
-import nltk # Added to ensure access to download if needed
+import nltk
+import sys
 
 warnings.filterwarnings('ignore')
 
@@ -27,7 +28,7 @@ ASSET_PATH = os.path.join(os.path.dirname(__file__))  # Where models are stored
 MONGO_URI = os.environ.get('MONGO_URI')
 
 if not MONGO_URI:
-    # Optional: Fallback for local testing ONLY if you aren't using .env file correctly yet,
+    # Optional: Fallback for local testing ONLY if you aren't using the .env file correctly yet,
     # but theoretically, you should rely 100% on .env
     print("⚠️ WARNING: MONGO_URI not found in environment variables.")
 
@@ -36,6 +37,36 @@ model = None
 vectorizer = None
 stop_words = None
 mongo_client = None
+
+# ===== MEMORY DETECTION ENGINE =====
+def get_available_memory_mb():
+    """
+    Detects available memory limit (works on Docker/Render/Linux).
+    Returns total memory in MB.
+    """
+    try:
+        # Try cgroup v1 (Common in Docker/Render)
+        if os.path.exists('/sys/fs/cgroup/memory/memory.limit_in_bytes'):
+            with open('/sys/fs/cgroup/memory/memory.limit_in_bytes') as f:
+                return int(f.read()) / (1024 * 1024)
+        
+        # Try cgroup v2
+        elif os.path.exists('/sys/fs/cgroup/memory.max'):
+            with open('/sys/fs/cgroup/memory.max') as f:
+                content = f.read().strip()
+                if content == "max": return 8192 # Arbitrary high number if unconstrained
+                return int(content) / (1024 * 1024)
+                
+        # Fallback to standard Linux meminfo
+        elif os.path.exists('/proc/meminfo'):
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if 'MemTotal' in line:
+                        return int(line.split()[1]) / 1024
+        
+        return 512 # Conservative fallback
+    except:
+        return 512 # Conservative fallback
 
 def init_resources():
     """Initialize ML models and MongoDB connection once"""
@@ -201,21 +232,64 @@ def analyze_single_text(text):
             'error': str(e)
         }
 
-def process_texts_parallel(text_list, job_id=None, user_id=None):
-    """Process list of texts in parallel using multiprocessing"""
-    print(f"📊 Processing {len(text_list)} texts in parallel...")
+# ===== ENGINE 1: PARALLEL PROCESSOR =====
+def process_texts_parallel(text_list):
+    """
+    High-Performance Mode: Uses Multiprocessing.
+    Requirement: Needs ~1.2GB+ RAM.
+    """
+    workers = min(mp.cpu_count(), 4) # Cap at 4 workers safely
+    print(f"🚀 PARALLEL MODE ACTIVATED: Using {workers} workers")
+    
+    with mp.Pool(processes=workers, initializer=init_worker) as pool:
+        results = pool.map(analyze_single_text, text_list)
+        
+    return results, workers
+
+# ===== ENGINE 2: SEQUENTIAL PROCESSOR =====
+def process_texts_sequentially(text_list):
+    """
+    Safe Mode: Uses Single Process.
+    Requirement: Low RAM (~300MB).
+    """
+    print(f"🐢 SEQUENTIAL MODE ACTIVATED: Saving RAM")
+    init_resources() # Ensure loaded in main process
+    
+    results = []
+    for text in text_list:
+        results.append(analyze_single_text(text))
+        
+    return results, 1
+
+# ===== THE SMART DISPATCHER =====
+def smart_process_texts(text_list, job_id=None, user_id=None):
     start_time = time.time()
     
-    # Use multiprocessing pool
-    # We use initializer to ensure each worker has its own loaded model instance
-    with mp.Pool(processes=min(mp.cpu_count(), len(text_list)), initializer=init_worker) as pool:
-        results = pool.map(analyze_single_text, text_list)
+    # 1. Detect RAM
+    total_mem = get_available_memory_mb()
+    print(f"💾 Detected System Memory: {total_mem:.2f} MB")
     
+    # 2. Decide Strategy
+    # Threshold: We need at least 1500MB to comfortably run parallel workers
+    # Render Free Tier is 512MB -> This will correctly choose Sequential
+    if total_mem > 1500 and len(text_list) > 100:
+        try:
+            results, workers_used = process_texts_parallel(text_list)
+        except Exception as e:
+            print(f"⚠️ Parallel crashed ({e}), falling back to Sequential...")
+            results, workers_used = process_texts_sequentially(text_list)
+    else:
+        if total_mem <= 1500:
+            print("⚠️ Low Memory Detected (<1.5GB) - Forcing Sequential Mode")
+        else:
+            print("ℹ️ Small batch - Using Sequential Mode for speed")
+        results, workers_used = process_texts_sequentially(text_list)
+
+    # 3. Calculate Stats & Format
     processing_time = time.time() - start_time
     
-    # Calculate statistics
-    scores = [r['sentimentScore'] for r in results if 'error' not in r]
-    labels = [r['sentimentLabel'] for r in results if 'error' not in r]
+    scores = [r.get('sentimentScore', 0) for r in results if 'error' not in r]
+    labels = [r.get('sentimentLabel', 'neutral') for r in results if 'error' not in r]
     
     if scores:
         avg_sentiment = sum(scores) / len(scores)
@@ -226,21 +300,18 @@ def process_texts_parallel(text_list, job_id=None, user_id=None):
         avg_sentiment = 0.0
         pos_count = neg_count = neu_count = 0
     
-    # Format results for MongoDB
     formatted_results = []
     for idx, result in enumerate(results):
         formatted_results.append({
             'lineNumber': idx + 1,
-            'originalText': result['originalText'],
-            'sentimentScore': result['sentimentScore'],
-            'sentimentLabel': result['sentimentLabel'],
+            'originalText': result.get('originalText', ''),
+            'sentimentScore': result.get('sentimentScore', 0.0),
+            'sentimentLabel': result.get('sentimentLabel', 'neutral'),
             'keywords': result.get('keywords', []),
-            'patternsFound': ['ml_prediction'],  # Can add more patterns
+            'patternsFound': ['ml_prediction'],
             'metadata': {
                 'confidence': result.get('confidence', 0.0),
-                'cleanedText': result.get('cleanedText', ''),
-                'processId': os.getpid(),
-                'processingTime': time.time()
+                'cleanedText': result.get('cleanedText', '')
             }
         })
     
@@ -249,7 +320,8 @@ def process_texts_parallel(text_list, job_id=None, user_id=None):
         'userId': user_id,
         'totalLines': len(text_list),
         'processingTimeMs': int(processing_time * 1000),
-        'workersUsed': min(mp.cpu_count(), len(text_list)),
+        'workersUsed': workers_used,
+        'processingMode': 'parallel' if workers_used > 1 else 'sequential',
         'averageSentiment': float(avg_sentiment),
         'sentimentDistribution': {
             'positive': pos_count,
@@ -402,7 +474,7 @@ def process_content():
             return jsonify({'success': False, 'error': 'No text content found'}), 400
         
         # Process with your ML model (same function)
-        processing_result = process_texts_parallel(texts, job_id, user_id)
+        processing_result = smart_process_texts(texts, job_id, user_id)
         
         # Update MongoDB if job_id provided
         if job_id and mongo_client:
@@ -511,7 +583,7 @@ def process_file():
             }), 400
         
         # Process texts in parallel
-        processing_result = process_texts_parallel(texts, job_id, user_id)
+        processing_result = smart_process_texts(texts, job_id, user_id)
         
         # Update MongoDB if job_id provided
         if job_id and mongo_client:
