@@ -178,17 +178,23 @@ def smart_process_texts(text_list, job_id=None, user_id=None):
     total_mem = get_available_memory_mb()
     print(f"💾 Detected System Memory: {total_mem:.2f} MB")
     
+    # Determine mode variable for logging
+    mode = "sequential" 
+    
     # Threshold: 1500MB
     if total_mem > 1500 and len(text_list) > 100:
         try:
             print("🚀 High RAM -> Parallel Mode")
             results, workers_used = process_texts_parallel(text_list)
+            mode = "parallel" # <--- Track mode
         except Exception as e:
             print(f"⚠️ Parallel failed ({e}) -> Sequential Mode")
             results, workers_used = process_texts_sequentially(text_list)
+            mode = "sequential"
     else:
         print("🐢 Low RAM/Small Batch -> Sequential Mode")
         results, workers_used = process_texts_sequentially(text_list)
+        mode = "sequential"
 
     # Stats calculation
     scores = [r.get('sentimentScore', 0) for r in results if 'error' not in r]
@@ -215,20 +221,25 @@ def smart_process_texts(text_list, job_id=None, user_id=None):
             'metadata': {
                 'confidence': result.get('confidence', 0.0),
                 'cleanedText': result.get('cleanedText', ''),
-                'processId': os.getpid(),       # <--- ADDED BACK (Required by Frontend)
-                'processingTime': time.time()   # <--- ADDED BACK (Required by Frontend)
+                'processId': os.getpid(),
+                'processingTime': time.time()
             }
         })
     
     return {
-        'jobId': job_id, 'userId': user_id, 'totalLines': len(text_list),
+        'jobId': job_id, 
+        'userId': user_id, 
+        'totalLines': len(text_list),
         'processingTimeMs': int((time.time() - start_time) * 1000),
         'workersUsed': workers_used,
         'averageSentiment': float(avg_sentiment),
         'sentimentDistribution': {'positive': pos_count, 'neutral': neu_count, 'negative': neg_count},
-        'results': formatted_results, 'status': 'completed', 'completedAt': datetime.utcnow().isoformat()
+        'results': formatted_results, 
+        'status': 'completed', 
+        'processingMode': mode, # <--- THIS WAS MISSING!
+        'completedAt': datetime.utcnow().isoformat()
     }
-
+    
 # ===== 6. API ENDPOINTS =====
 
 @app.route('/health', methods=['GET'])
