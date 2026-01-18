@@ -1,0 +1,23 @@
+# --- 1. Security: Block all secret files ---
+.env
+.env.local
+backend/.env
+frontend/.env
+model/.env
+
+# --- 2. Dependencies: Block massive download folders ---
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+model/venv/
+model/env/
+
+# --- 3. Junk: Block system & log files ---
+npm-debug.log
+yarn-error.log
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
+dist/
+build/
