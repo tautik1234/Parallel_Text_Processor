@@ -3,9 +3,17 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
+const fs = require('fs');
 
 // Load environment variables
 dotenv.config();
+
+// Automatically create uploads folder if it doesn't exist
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)){
+    fs.mkdirSync(uploadDir, { recursive: true });
+    console.log(`📁 Created uploads directory at: ${uploadDir}`);
+}
 
 // Import database connection
 const connectDB = require('./config/database');
