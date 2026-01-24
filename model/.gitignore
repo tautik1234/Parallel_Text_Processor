@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.env
+venv/
+*.csv
+project_results.db
+.DS_Store

@@ -1,6 +1,9 @@
 # sentiment_api.py
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
+
+load_dotenv()
 import joblib
 import re
 import pandas as pd
@@ -36,10 +39,33 @@ vectorizer = None
 stop_words = None
 mongo_client = None
 
+import platform
+import ctypes
+
 # ===== 1. MEMORY DETECTION ENGINE =====
 def get_available_memory_mb():
-    """Detects available memory limit."""
+    """Detects available memory limit (Cross-Platform)."""
     try:
+        # Windows Support
+        if platform.system() == "Windows":
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            return stat.ullTotalPhys / (1024 * 1024)
+
+        # Linux / Docker Support
         if os.path.exists('/sys/fs/cgroup/memory/memory.limit_in_bytes'):
             with open('/sys/fs/cgroup/memory/memory.limit_in_bytes') as f:
                 return int(f.read()) / (1024 * 1024)
@@ -54,7 +80,8 @@ def get_available_memory_mb():
                     if 'MemTotal' in line:
                         return int(line.split()[1]) / 1024
         return 512
-    except:
+    except Exception as e:
+        print(f"⚠️ Memory detection failed: {e}")
         return 512
 
 # ===== 2. INITIALIZATION =====
@@ -130,6 +157,7 @@ def analyze_single_text(text):
         
         text_vector = vectorizer.transform([cleaned])
         prediction = model.predict(text_vector)[0]
+        print(f"DEBUG: Text='{cleaned[:20]}...', Prediction={prediction}, Type={type(prediction)}")
         
         confidence = 0.0
         try:
@@ -297,6 +325,10 @@ def process_content():
                         'status': 'completed', 'progress': 100,
                         'results': result['results'],
                         'sentimentDistribution': result['sentimentDistribution'],
+                        'averageSentiment': result['averageSentiment'],
+                        'totalLines': result['totalLines'],
+                        'processingTimeMs': result['processingTimeMs'],
+                        'workersUsed': result['workersUsed'],
                         'processingMode': result.get('processingMode', 'sequential'),
                         'completedAt': datetime.utcnow()
                     }}
